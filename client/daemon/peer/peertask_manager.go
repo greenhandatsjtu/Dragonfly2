@@ -129,6 +129,7 @@ type peerTaskManager struct {
 	conductorLock    sync.Locker
 	runningPeerTasks sync.Map
 
+	trafficShaper    TrafficShaper
 	perPeerRateLimit rate.Limit
 
 	// enableMultiplex indicates to reuse the data of completed peer tasks
@@ -149,6 +150,8 @@ func NewPeerTaskManager(
 	storageManager storage.Manager,
 	schedulerClient schedulerclient.Client,
 	schedulerOption config.SchedulerOption,
+	enableTrafficShaper bool,
+	totalRateLimit rate.Limit,
 	perPeerRateLimit rate.Limit,
 	multiplex bool,
 	prefetch bool,
@@ -170,6 +173,10 @@ func NewPeerTaskManager(
 		watchdogTimeout:   watchdog,
 		calculateDigest:   calculateDigest,
 		getPiecesMaxRetry: getPiecesMaxRetry,
+	}
+	if enableTrafficShaper {
+		ptm.trafficShaper = NewTrafficShaper(totalRateLimit)
+		ptm.trafficShaper.Start()
 	}
 	return ptm, nil
 }
@@ -217,7 +224,7 @@ func (ptm *peerTaskManager) getOrCreatePeerTaskConductor(
 		logger.Debugf("peer task found: %s/%s", ptc.taskID, ptc.peerID)
 		return ptc, false, nil
 	}
-	ptc := ptm.newPeerTaskConductor(ctx, request, limit, parent, rg, seed)
+	ptc := ptm.newPeerTaskConductor(ctx, request, ptm.trafficShaper, limit, parent, rg, seed)
 
 	ptm.conductorLock.Lock()
 	// double check
@@ -398,6 +405,9 @@ func (ptm *peerTaskManager) Subscribe(request *commonv1.PieceTaskRequest) (*Subs
 
 func (ptm *peerTaskManager) Stop(ctx context.Context) error {
 	// TODO
+	if ptm.trafficShaper != nil {
+		ptm.trafficShaper.Stop()
+	}
 	return nil
 }
 

@@ -197,8 +197,8 @@ func New(opt *config.DaemonOption, d dfpath.Dfpath) (Daemon, error) {
 		return nil, err
 	}
 	peerTaskManager, err := peer.NewPeerTaskManager(host, pieceManager, storageManager, sched, opt.Scheduler,
-		opt.Download.PerPeerRateLimit.Limit, opt.Storage.Multiplex, opt.Download.Prefetch, opt.Download.CalculateDigest,
-		opt.Download.GetPiecesMaxRetry, opt.Download.WatchdogTimeout)
+		opt.Download.EnableTrafficShaper, opt.Download.TotalRateLimit.Limit, opt.Download.PerPeerRateLimit.Limit, opt.Storage.Multiplex,
+		opt.Download.Prefetch, opt.Download.CalculateDigest, opt.Download.GetPiecesMaxRetry, opt.Download.WatchdogTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -662,6 +662,10 @@ func (cd *clientDaemon) Stop() {
 		cd.RPCManager.Stop()
 		if err := cd.UploadManager.Stop(); err != nil {
 			logger.Errorf("upload manager stop failed %s", err)
+		}
+
+		if err := cd.PeerTaskManager.Stop(context.Background()); err != nil {
+			logger.Errorf("peertask manager stop failed %s", err)
 		}
 
 		if cd.Option.ObjectStorage.Enable {
