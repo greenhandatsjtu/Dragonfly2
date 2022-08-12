@@ -18,14 +18,16 @@ package peer
 
 import (
 	"context"
-	"golang.org/x/time/rate"
 	"sync"
 	"time"
+
+	"golang.org/x/time/rate"
 )
 
 type TrafficShaper interface {
 	Start()
 	Stop()
+	UpdateLimit()
 	WaitN(ctx context.Context, n int, taskID string, ptc *peerTaskConductor) error
 }
 
@@ -37,13 +39,15 @@ type taskEntry struct {
 type trafficShaper struct {
 	sync.Mutex
 	*rate.Limiter
+	ptm    *peerTaskManager
 	tasks  map[string]*taskEntry
 	stopCh chan struct{}
 }
 
-func NewTrafficShaper(totalRateLimit rate.Limit) TrafficShaper {
+func NewTrafficShaper(totalRateLimit rate.Limit, ptm *peerTaskManager) TrafficShaper {
 	return &trafficShaper{
 		Limiter: rate.NewLimiter(totalRateLimit, int(totalRateLimit)),
+		ptm:     ptm,
 		tasks:   make(map[string]*taskEntry),
 		stopCh:  make(chan struct{}),
 	}
@@ -56,22 +60,7 @@ func (ts *trafficShaper) Start() {
 		for {
 			select {
 			case <-ticker.C:
-				ts.Lock()
-				var totalRemainingLength int64
-				// compute overall remaining length of all tasks
-				for _, task := range ts.tasks {
-					remainingLength := task.ptc.completedLength.Load() - task.ptc.completedLength.Load()
-					totalRemainingLength += remainingLength
-				}
-				// allocate bandwidth for tasks based on their remaining length
-				for taskID, task := range ts.tasks {
-					remainingLength := task.ptc.completedLength.Load() - task.ptc.completedLength.Load()
-					limit := float64(remainingLength) / float64(totalRemainingLength)
-					task.ptc.limiter.SetLimit(rate.Limit(limit))
-					task.ptc.limiter.SetBurst(int(limit))
-					delete(ts.tasks, taskID)
-				}
-				ts.Unlock()
+				ts.UpdateLimit()
 			case <-ts.stopCh:
 				return
 			}
@@ -83,24 +72,34 @@ func (ts *trafficShaper) Stop() {
 	close(ts.stopCh)
 }
 
+func (ts *trafficShaper) UpdateLimit() {
+	var totalRemainingLength int64
+	// compute overall remaining length of all tasks
+	ts.ptm.runningPeerTasks.Range(func(key, value any) bool {
+		ptc := value.(*peerTaskConductor)
+		remainingLength := ptc.completedLength.Load() - ptc.completedLength.Load()
+		totalRemainingLength += remainingLength
+		return true
+	})
+	// allocate bandwidth for tasks based on their remaining length
+	ts.ptm.runningPeerTasks.Range(func(key, value any) bool {
+		ptc := value.(*peerTaskConductor)
+		remainingLength := ptc.completedLength.Load() - ptc.completedLength.Load()
+		limit := float64(remainingLength) / float64(totalRemainingLength)
+		ptc.limiter.SetLimit(rate.Limit(limit))
+		ptc.limiter.SetBurst(int(limit))
+		return true
+	})
+}
+
 func (ts *trafficShaper) WaitN(ctx context.Context, n int, taskID string, ptc *peerTaskConductor) error {
 	if err := ts.Limiter.WaitN(ctx, n); err != nil {
 		return err
 	}
 	ts.Lock()
 	if _, ok := ts.tasks[taskID]; !ok {
-		// new task
 		ts.tasks[taskID] = &taskEntry{ptc: ptc, usedBandwidth: n}
-		totalRateLimit := float64(ts.Limit())
-		ratio := totalRateLimit - float64(ptc.limiter.Limit())/totalRateLimit
-		// scale all tasks' bandwidth
-		for _, task := range ts.tasks {
-			limit := ratio * float64(task.ptc.limiter.Limit())
-			task.ptc.limiter.SetLimit(rate.Limit(limit))
-			task.ptc.limiter.SetBurst(int(limit))
-		}
 	} else {
-		// record used bandwidth
 		ts.tasks[taskID].usedBandwidth += n
 	}
 	ts.Unlock()

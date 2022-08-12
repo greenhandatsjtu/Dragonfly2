@@ -175,7 +175,7 @@ func NewPeerTaskManager(
 		getPiecesMaxRetry: getPiecesMaxRetry,
 	}
 	if enableTrafficShaper {
-		ptm.trafficShaper = NewTrafficShaper(totalRateLimit)
+		ptm.trafficShaper = NewTrafficShaper(totalRateLimit, ptm)
 		ptm.trafficShaper.Start()
 	}
 	return ptm, nil
@@ -240,6 +240,7 @@ func (ptm *peerTaskManager) getOrCreatePeerTaskConductor(
 	}
 	ptm.runningPeerTasks.Store(taskID, ptc)
 	ptm.conductorLock.Unlock()
+	ptm.trafficShaper.UpdateLimit()
 	metrics.PeerTaskCount.Add(1)
 	logger.Debugf("peer task created: %s/%s", ptc.taskID, ptc.peerID)
 
@@ -414,6 +415,7 @@ func (ptm *peerTaskManager) Stop(ctx context.Context) error {
 func (ptm *peerTaskManager) PeerTaskDone(taskID string) {
 	logger.Debugf("delete done task %s in running tasks", taskID)
 	ptm.runningPeerTasks.Delete(taskID)
+	ptm.trafficShaper.UpdateLimit()
 }
 
 func (ptm *peerTaskManager) IsPeerTaskRunning(taskID string) (Task, bool) {
