@@ -77,15 +77,15 @@ func (ts *trafficShaper) UpdateLimit() {
 	// compute overall remaining length of all tasks
 	ts.ptm.runningPeerTasks.Range(func(key, value any) bool {
 		ptc := value.(*peerTaskConductor)
-		remainingLength := ptc.completedLength.Load() - ptc.completedLength.Load()
+		remainingLength := ptc.contentLength.Load() - ptc.completedLength.Load()
 		totalRemainingLength += remainingLength
 		return true
 	})
 	// allocate bandwidth for tasks based on their remaining length
 	ts.ptm.runningPeerTasks.Range(func(key, value any) bool {
 		ptc := value.(*peerTaskConductor)
-		remainingLength := ptc.completedLength.Load() - ptc.completedLength.Load()
-		limit := float64(remainingLength) / float64(totalRemainingLength)
+		remainingLength := ptc.contentLength.Load() - ptc.completedLength.Load()
+		limit := float64(ts.Limit()) * float64(remainingLength) / float64(totalRemainingLength)
 		ptc.limiter.SetLimit(rate.Limit(limit))
 		ptc.limiter.SetBurst(int(limit))
 		return true
