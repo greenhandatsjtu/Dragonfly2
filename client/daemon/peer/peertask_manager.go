@@ -150,7 +150,7 @@ func NewPeerTaskManager(
 	storageManager storage.Manager,
 	schedulerClient schedulerclient.Client,
 	schedulerOption config.SchedulerOption,
-	enableTrafficShaper bool,
+	trafficShaperType string,
 	totalRateLimit rate.Limit,
 	perPeerRateLimit rate.Limit,
 	multiplex bool,
@@ -174,10 +174,8 @@ func NewPeerTaskManager(
 		calculateDigest:   calculateDigest,
 		getPiecesMaxRetry: getPiecesMaxRetry,
 	}
-	if enableTrafficShaper {
-		ptm.trafficShaper = NewTrafficShaper(totalRateLimit, ptm)
-		ptm.trafficShaper.Start()
-	}
+	ptm.trafficShaper = NewTrafficShaper(totalRateLimit, ptm, trafficShaperType)
+	ptm.trafficShaper.Start()
 	return ptm, nil
 }
 

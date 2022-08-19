@@ -24,6 +24,11 @@ import (
 	"golang.org/x/time/rate"
 )
 
+const (
+	TypePlainTrafficShaper    = "plain"
+	TypeSamplingTrafficShaper = "sampling"
+)
+
 type TrafficShaper interface {
 	Start()
 	Stop()
@@ -31,12 +36,46 @@ type TrafficShaper interface {
 	WaitN(ctx context.Context, n int, taskID string, ptc *peerTaskConductor) error
 }
 
+func NewTrafficShaper(totalRateLimit rate.Limit, ptm *peerTaskManager, trafficShaperType string) TrafficShaper {
+	var ts TrafficShaper
+	switch trafficShaperType {
+	case TypeSamplingTrafficShaper:
+		ts = NewSamplingTrafficShaper(totalRateLimit, ptm)
+	case TypePlainTrafficShaper:
+		ts = NewPlainTrafficShaper(totalRateLimit, ptm)
+	default:
+		ts = NewPlainTrafficShaper(totalRateLimit, ptm)
+	}
+	return ts
+}
+
 type taskEntry struct {
 	ptc           *peerTaskConductor
 	usedBandwidth int
 }
 
-type trafficShaper struct {
+type plainTrafficShaper struct {
+	*rate.Limiter
+}
+
+func NewPlainTrafficShaper(totalRateLimit rate.Limit, _ *peerTaskManager) TrafficShaper {
+	return &plainTrafficShaper{Limiter: rate.NewLimiter(totalRateLimit, int(totalRateLimit))}
+}
+
+func (ts *plainTrafficShaper) Start() {
+}
+
+func (ts *plainTrafficShaper) Stop() {
+}
+
+func (ts *plainTrafficShaper) UpdateLimit() {
+}
+
+func (ts *plainTrafficShaper) WaitN(ctx context.Context, n int, _ string, _ *peerTaskConductor) error {
+	return ts.Limiter.WaitN(ctx, n)
+}
+
+type samplingTrafficShaper struct {
 	sync.Mutex
 	*rate.Limiter
 	ptm    *peerTaskManager
@@ -44,8 +83,8 @@ type trafficShaper struct {
 	stopCh chan struct{}
 }
 
-func NewTrafficShaper(totalRateLimit rate.Limit, ptm *peerTaskManager) TrafficShaper {
-	return &trafficShaper{
+func NewSamplingTrafficShaper(totalRateLimit rate.Limit, ptm *peerTaskManager) TrafficShaper {
+	return &samplingTrafficShaper{
 		Limiter: rate.NewLimiter(totalRateLimit, int(totalRateLimit)),
 		ptm:     ptm,
 		tasks:   make(map[string]*taskEntry),
@@ -53,7 +92,7 @@ func NewTrafficShaper(totalRateLimit rate.Limit, ptm *peerTaskManager) TrafficSh
 	}
 }
 
-func (ts *trafficShaper) Start() {
+func (ts *samplingTrafficShaper) Start() {
 	go func() {
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
@@ -68,11 +107,11 @@ func (ts *trafficShaper) Start() {
 	}()
 }
 
-func (ts *trafficShaper) Stop() {
+func (ts *samplingTrafficShaper) Stop() {
 	close(ts.stopCh)
 }
 
-func (ts *trafficShaper) UpdateLimit() {
+func (ts *samplingTrafficShaper) UpdateLimit() {
 	var totalRemainingLength int64
 	// compute overall remaining length of all tasks
 	ts.ptm.runningPeerTasks.Range(func(key, value any) bool {
@@ -92,7 +131,7 @@ func (ts *trafficShaper) UpdateLimit() {
 	})
 }
 
-func (ts *trafficShaper) WaitN(ctx context.Context, n int, taskID string, ptc *peerTaskConductor) error {
+func (ts *samplingTrafficShaper) WaitN(ctx context.Context, n int, taskID string, ptc *peerTaskConductor) error {
 	if err := ts.Limiter.WaitN(ctx, n); err != nil {
 		return err
 	}
