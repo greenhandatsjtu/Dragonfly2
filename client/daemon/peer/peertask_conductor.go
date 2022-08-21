@@ -1266,10 +1266,8 @@ func (pt *peerTaskConductor) downloadPiece(workerID int32, request *DownloadPiec
 func (pt *peerTaskConductor) waitLimit(ctx context.Context, request *DownloadPieceRequest) bool {
 	_, waitSpan := tracer.Start(ctx, config.SpanWaitPieceLimit)
 	err := pt.limiter.WaitN(pt.ctx, int(request.piece.RangeSize))
-	if err == nil && pt.trafficShaper != nil {
-		err = pt.trafficShaper.WaitN(pt.ctx, int(request.piece.RangeSize), request.TaskID)
-	}
 	if err == nil {
+		pt.trafficShaper.Record(request.TaskID, int(request.piece.RangeSize))
 		waitSpan.End()
 		return true
 	}

@@ -17,7 +17,6 @@
 package peer
 
 import (
-	"context"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -35,28 +34,27 @@ type TrafficShaper interface {
 	Stop()
 	AddTask(taskID string, ptc *peerTaskConductor)
 	RemoveTask(taskID string)
-	WaitN(ctx context.Context, n int, taskID string) error
+	Record(taskID string, n int)
 }
 
-func NewTrafficShaper(totalRateLimit rate.Limit, ptm *peerTaskManager, trafficShaperType string) TrafficShaper {
+func NewTrafficShaper(totalRateLimit rate.Limit, trafficShaperType string) TrafficShaper {
 	var ts TrafficShaper
 	switch trafficShaperType {
 	case TypeSamplingTrafficShaper:
-		ts = NewSamplingTrafficShaper(totalRateLimit, ptm)
+		ts = NewSamplingTrafficShaper(totalRateLimit)
 	case TypePlainTrafficShaper:
-		ts = NewPlainTrafficShaper(totalRateLimit, ptm)
+		ts = NewPlainTrafficShaper(totalRateLimit)
 	default:
-		ts = NewPlainTrafficShaper(totalRateLimit, ptm)
+		ts = NewPlainTrafficShaper(totalRateLimit)
 	}
 	return ts
 }
 
 type plainTrafficShaper struct {
-	*rate.Limiter
 }
 
-func NewPlainTrafficShaper(totalRateLimit rate.Limit, _ *peerTaskManager) TrafficShaper {
-	return &plainTrafficShaper{Limiter: rate.NewLimiter(totalRateLimit, int(totalRateLimit))}
+func NewPlainTrafficShaper(_ rate.Limit) TrafficShaper {
+	return &plainTrafficShaper{}
 }
 
 func (ts *plainTrafficShaper) Start() {
@@ -71,30 +69,28 @@ func (ts *plainTrafficShaper) AddTask(_ string, _ *peerTaskConductor) {
 func (ts *plainTrafficShaper) RemoveTask(_ string) {
 }
 
-func (ts *plainTrafficShaper) WaitN(ctx context.Context, n int, _ string) error {
-	return ts.Limiter.WaitN(ctx, n)
+func (ts *plainTrafficShaper) Record(_ string, _ int) {
 }
 
 type taskEntry struct {
 	ptc           *peerTaskConductor
 	usedBandwidth atomic.Int64
 	needBandwidth int64
+	needUpdate    bool
 }
 
 type samplingTrafficShaper struct {
 	sync.Mutex
-	*rate.Limiter
-	ptm    *peerTaskManager
-	tasks  map[string]*taskEntry
-	stopCh chan struct{}
+	totalRateLimit rate.Limit
+	tasks          map[string]*taskEntry
+	stopCh         chan struct{}
 }
 
-func NewSamplingTrafficShaper(totalRateLimit rate.Limit, ptm *peerTaskManager) TrafficShaper {
+func NewSamplingTrafficShaper(totalRateLimit rate.Limit) TrafficShaper {
 	return &samplingTrafficShaper{
-		Limiter: rate.NewLimiter(totalRateLimit, int(totalRateLimit)),
-		ptm:     ptm,
-		tasks:   make(map[string]*taskEntry),
-		stopCh:  make(chan struct{}),
+		totalRateLimit: totalRateLimit,
+		tasks:          make(map[string]*taskEntry),
+		stopCh:         make(chan struct{}),
 	}
 }
 
@@ -118,53 +114,50 @@ func (ts *samplingTrafficShaper) Stop() {
 }
 
 func (ts *samplingTrafficShaper) updateLimit() {
-	var totalRemainingLength int64
+	var totalNeedBandwidth int64
 	ts.Lock()
 	defer ts.Unlock()
 	// compute overall remaining length of all tasks
-	ts.ptm.runningPeerTasks.Range(func(key, value any) bool {
-		ptc := value.(*peerTaskConductor)
-		remainingLength := ptc.contentLength.Load() - ptc.completedLength.Load()
+	for _, te := range ts.tasks {
+		remainingLength := te.ptc.contentLength.Load() - te.ptc.completedLength.Load()
 		var needBandwidth int64
-		if !ptc.limiter.Allow() {
-			// case 1: bandwidth is fully used
-			needBandwidth = remainingLength
+		if !te.needUpdate {
+			// if this task is added within 1 second, don't update its limit this time
+			te.needUpdate = true
+			needBandwidth = int64(te.ptc.limiter.Limit())
 		} else {
-			// case 2: bandwidth is not fully used
-			usedBandwidth := ts.tasks[key.(string)].usedBandwidth.Load()
-			if usedBandwidth < remainingLength {
-				needBandwidth = usedBandwidth
+			if !te.ptc.limiter.Allow() {
+				// case 1: bandwidth is fully used
+				needBandwidth = int64(te.ptc.limiter.Limit())
 			} else {
+				// case 2: bandwidth is not fully used
+				needBandwidth = te.usedBandwidth.Load()
+			}
+			if remainingLength < needBandwidth {
 				needBandwidth = remainingLength
 			}
 		}
-		ts.tasks[key.(string)].needBandwidth = needBandwidth
-		totalRemainingLength += needBandwidth
-		return true
-	})
+		te.needBandwidth = needBandwidth
+		totalNeedBandwidth += needBandwidth
+		te.usedBandwidth.Store(0)
+	}
+
 	// allocate bandwidth for tasks based on their remaining length
-	ts.ptm.runningPeerTasks.Range(func(key, value any) bool {
-		ptc := value.(*peerTaskConductor)
-		limit := float64(ts.Limit()) * (float64(ts.tasks[key.(string)].needBandwidth) / float64(totalRemainingLength))
-		ptc.limiter.SetLimit(rate.Limit(limit))
-		ptc.limiter.SetBurst(int(limit))
-		ts.tasks[key.(string)].usedBandwidth.Store(0)
-		return true
-	})
+	for _, te := range ts.tasks {
+		limit := float64(ts.totalRateLimit) * (float64(te.needBandwidth) / float64(totalNeedBandwidth))
+		te.ptc.limiter.SetLimit(rate.Limit(limit))
+	}
 }
 
 func (ts *samplingTrafficShaper) AddTask(taskID string, ptc *peerTaskConductor) {
 	ts.Lock()
 	defer ts.Unlock()
 	ts.tasks[taskID] = &taskEntry{ptc: ptc}
-	ratio := ts.Limit() / (ts.Limit() + ptc.limiter.Limit())
-	ts.ptm.runningPeerTasks.Range(func(key, value any) bool {
-		ptc := value.(*peerTaskConductor)
-		newLimit := ratio * ts.tasks[key.(string)].ptc.limiter.Limit()
-		ptc.limiter.SetLimit(newLimit)
-		ptc.limiter.SetBurst(int(newLimit))
-		return true
-	})
+	ratio := ts.totalRateLimit / (ts.totalRateLimit + ptc.limiter.Limit())
+	for _, te := range ts.tasks {
+		newLimit := ratio * te.ptc.limiter.Limit()
+		te.ptc.limiter.SetLimit(newLimit)
+	}
 }
 
 func (ts *samplingTrafficShaper) RemoveTask(taskID string) {
@@ -172,22 +165,15 @@ func (ts *samplingTrafficShaper) RemoveTask(taskID string) {
 	defer ts.Unlock()
 	limit := ts.tasks[taskID].ptc.limiter.Limit()
 	delete(ts.tasks, taskID)
-	ratio := ts.Limit() / (ts.Limit() - limit)
-	ts.ptm.runningPeerTasks.Range(func(key, value any) bool {
-		ptc := value.(*peerTaskConductor)
-		newLimit := ratio * ts.tasks[key.(string)].ptc.limiter.Limit()
-		ptc.limiter.SetLimit(newLimit)
-		ptc.limiter.SetBurst(int(newLimit))
-		return true
-	})
+	ratio := ts.totalRateLimit / (ts.totalRateLimit - limit)
+	for _, te := range ts.tasks {
+		newLimit := ratio * te.ptc.limiter.Limit()
+		te.ptc.limiter.SetLimit(newLimit)
+	}
 }
 
-func (ts *samplingTrafficShaper) WaitN(ctx context.Context, n int, taskID string) error {
-	if err := ts.Limiter.WaitN(ctx, n); err != nil {
-		return err
-	}
+func (ts *samplingTrafficShaper) Record(taskID string, n int) {
 	ts.Lock()
 	ts.tasks[taskID].usedBandwidth.Add(int64(n))
 	ts.Unlock()
-	return nil
 }

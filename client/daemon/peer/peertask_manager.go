@@ -167,6 +167,7 @@ func NewPeerTaskManager(
 		storageManager:    storageManager,
 		schedulerClient:   schedulerClient,
 		schedulerOption:   schedulerOption,
+		trafficShaper:     NewTrafficShaper(totalRateLimit, trafficShaperType),
 		perPeerRateLimit:  perPeerRateLimit,
 		enableMultiplex:   multiplex,
 		enablePrefetch:    prefetch,
@@ -174,7 +175,6 @@ func NewPeerTaskManager(
 		calculateDigest:   calculateDigest,
 		getPiecesMaxRetry: getPiecesMaxRetry,
 	}
-	ptm.trafficShaper = NewTrafficShaper(totalRateLimit, ptm, trafficShaperType)
 	ptm.trafficShaper.Start()
 	return ptm, nil
 }
@@ -404,9 +404,7 @@ func (ptm *peerTaskManager) Subscribe(request *commonv1.PieceTaskRequest) (*Subs
 
 func (ptm *peerTaskManager) Stop(ctx context.Context) error {
 	// TODO
-	if ptm.trafficShaper != nil {
-		ptm.trafficShaper.Stop()
-	}
+	ptm.trafficShaper.Stop()
 	return nil
 }
 
