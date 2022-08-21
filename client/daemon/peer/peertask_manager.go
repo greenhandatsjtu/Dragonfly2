@@ -238,7 +238,7 @@ func (ptm *peerTaskManager) getOrCreatePeerTaskConductor(
 	}
 	ptm.runningPeerTasks.Store(taskID, ptc)
 	ptm.conductorLock.Unlock()
-	ptm.trafficShaper.UpdateLimit()
+	ptm.trafficShaper.AddTask(taskID, ptc)
 	metrics.PeerTaskCount.Add(1)
 	logger.Debugf("peer task created: %s/%s", ptc.taskID, ptc.peerID)
 
@@ -413,7 +413,7 @@ func (ptm *peerTaskManager) Stop(ctx context.Context) error {
 func (ptm *peerTaskManager) PeerTaskDone(taskID string) {
 	logger.Debugf("delete done task %s in running tasks", taskID)
 	ptm.runningPeerTasks.Delete(taskID)
-	ptm.trafficShaper.UpdateLimit()
+	ptm.trafficShaper.RemoveTask(taskID)
 }
 
 func (ptm *peerTaskManager) IsPeerTaskRunning(taskID string) (Task, bool) {
