@@ -80,8 +80,8 @@ require (
 	gorm.io/driver/postgres v1.3.8
 	gorm.io/gorm v1.23.8
 	gorm.io/plugin/soft_delete v1.1.0
-	k8s.io/apimachinery v0.24.2
-	k8s.io/component-base v0.23.3
+	k8s.io/apimachinery v0.24.4
+	k8s.io/component-base v0.24.4
 	moul.io/zapgorm2 v1.1.3
 )
 
