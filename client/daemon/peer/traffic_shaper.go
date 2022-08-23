@@ -74,7 +74,7 @@ func (ts *plainTrafficShaper) Record(_ string, _ int) {
 
 type taskEntry struct {
 	ptc           *peerTaskConductor
-	usedBandwidth atomic.Int64
+	usedBandwidth int64
 	needBandwidth int64
 	needUpdate    bool
 }
@@ -131,7 +131,7 @@ func (ts *samplingTrafficShaper) updateLimit() {
 				needBandwidth = int64(te.ptc.limiter.Limit())
 			} else {
 				// case 2: bandwidth is not fully used
-				needBandwidth = te.usedBandwidth.Load()
+				needBandwidth = atomic.LoadInt64(&te.usedBandwidth)
 			}
 			if remainingLength < needBandwidth {
 				needBandwidth = remainingLength
@@ -139,7 +139,7 @@ func (ts *samplingTrafficShaper) updateLimit() {
 		}
 		te.needBandwidth = needBandwidth
 		totalNeedBandwidth += needBandwidth
-		te.usedBandwidth.Store(0)
+		atomic.StoreInt64(&te.usedBandwidth, 0)
 	}
 
 	// allocate bandwidth for tasks based on their remaining length
@@ -174,6 +174,6 @@ func (ts *samplingTrafficShaper) RemoveTask(taskID string) {
 
 func (ts *samplingTrafficShaper) Record(taskID string, n int) {
 	ts.Lock()
-	ts.tasks[taskID].usedBandwidth.Add(int64(n))
+	atomic.AddInt64(&ts.tasks[taskID].usedBandwidth, int64(n))
 	ts.Unlock()
 }
