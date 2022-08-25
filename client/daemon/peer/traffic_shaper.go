@@ -18,9 +18,9 @@ package peer
 
 import (
 	"sync"
-	"sync/atomic"
 	"time"
 
+	"go.uber.org/atomic"
 	"golang.org/x/time/rate"
 )
 
@@ -80,7 +80,7 @@ func (ts *plainTrafficShaper) Record(_ string, _ int) {
 
 type taskEntry struct {
 	ptc           *peerTaskConductor
-	usedBandwidth int64
+	usedBandwidth *atomic.Int64
 	needBandwidth int64
 	needUpdate    bool
 }
@@ -127,7 +127,6 @@ func (ts *samplingTrafficShaper) updateLimit() {
 	defer ts.Unlock()
 	// compute overall remaining length of all tasks
 	for _, te := range ts.tasks {
-		remainingLength := te.ptc.contentLength.Load() - te.ptc.completedLength.Load()
 		var needBandwidth int64
 		if !te.needUpdate {
 			// if this task is added within 1 second, don't update its limit this time
@@ -139,15 +138,18 @@ func (ts *samplingTrafficShaper) updateLimit() {
 				needBandwidth = int64(te.ptc.limiter.Limit())
 			} else {
 				// case 2: bandwidth is not fully used
-				needBandwidth = atomic.LoadInt64(&te.usedBandwidth)
+				needBandwidth = te.usedBandwidth.Load()
 			}
-			if remainingLength < needBandwidth {
-				needBandwidth = remainingLength
+			if contentLength := te.ptc.contentLength.Load(); contentLength > 0 {
+				remainingLength := contentLength - te.ptc.completedLength.Load()
+				if remainingLength < needBandwidth {
+					needBandwidth = remainingLength
+				}
 			}
 		}
 		te.needBandwidth = needBandwidth
 		totalNeedBandwidth += needBandwidth
-		atomic.StoreInt64(&te.usedBandwidth, 0)
+		te.usedBandwidth.Store(0)
 	}
 
 	// allocate bandwidth for tasks based on their remaining length
@@ -160,7 +162,7 @@ func (ts *samplingTrafficShaper) updateLimit() {
 func (ts *samplingTrafficShaper) AddTask(taskID string, ptc *peerTaskConductor) {
 	ts.Lock()
 	defer ts.Unlock()
-	ts.tasks[taskID] = &taskEntry{ptc: ptc}
+	ts.tasks[taskID] = &taskEntry{ptc: ptc, usedBandwidth: atomic.NewInt64(0)}
 	ratio := ts.totalRateLimit / (ts.totalRateLimit + ptc.limiter.Limit())
 	// reduce all running tasks' bandwidth
 	for _, te := range ts.tasks {
@@ -184,6 +186,6 @@ func (ts *samplingTrafficShaper) RemoveTask(taskID string) {
 
 func (ts *samplingTrafficShaper) Record(taskID string, n int) {
 	ts.Lock()
-	atomic.AddInt64(&ts.tasks[taskID].usedBandwidth, int64(n))
+	ts.tasks[taskID].usedBandwidth.Add(int64(n))
 	ts.Unlock()
 }
