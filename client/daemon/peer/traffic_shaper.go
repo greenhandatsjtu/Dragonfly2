@@ -29,11 +29,17 @@ const (
 	TypeSamplingTrafficShaper = "sampling"
 )
 
+// TrafficShaper allocates bandwidth for running tasks dynamically
 type TrafficShaper interface {
+	// Start starts the TrafficShaper
 	Start()
+	// Stop stops the TrafficShaper
 	Stop()
+	// AddTask starts managing the new task
 	AddTask(taskID string, ptc *peerTaskConductor)
+	// RemoveTask removes completed task
 	RemoveTask(taskID string)
+	// Record records task's used bandwidth
 	Record(taskID string, n int)
 }
 
@@ -96,6 +102,7 @@ func NewSamplingTrafficShaper(totalRateLimit rate.Limit) TrafficShaper {
 
 func (ts *samplingTrafficShaper) Start() {
 	go func() {
+		// update bandwidth of all running tasks every second
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
 		for {
@@ -113,6 +120,7 @@ func (ts *samplingTrafficShaper) Stop() {
 	close(ts.stopCh)
 }
 
+// updateLimit updates every task's limit every second
 func (ts *samplingTrafficShaper) updateLimit() {
 	var totalNeedBandwidth int64
 	ts.Lock()
@@ -154,6 +162,7 @@ func (ts *samplingTrafficShaper) AddTask(taskID string, ptc *peerTaskConductor) 
 	defer ts.Unlock()
 	ts.tasks[taskID] = &taskEntry{ptc: ptc}
 	ratio := ts.totalRateLimit / (ts.totalRateLimit + ptc.limiter.Limit())
+	// reduce all running tasks' bandwidth
 	for _, te := range ts.tasks {
 		newLimit := ratio * te.ptc.limiter.Limit()
 		te.ptc.limiter.SetLimit(newLimit)
@@ -166,6 +175,7 @@ func (ts *samplingTrafficShaper) RemoveTask(taskID string) {
 	limit := ts.tasks[taskID].ptc.limiter.Limit()
 	delete(ts.tasks, taskID)
 	ratio := ts.totalRateLimit / (ts.totalRateLimit - limit)
+	// increase all running tasks' bandwidth
 	for _, te := range ts.tasks {
 		newLimit := ratio * te.ptc.limiter.Limit()
 		te.ptc.limiter.SetLimit(newLimit)
