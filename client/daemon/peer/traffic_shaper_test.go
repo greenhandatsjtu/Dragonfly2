@@ -19,8 +19,8 @@ package peer
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
-	"go.uber.org/atomic"
 	"io"
 	"math"
 	"os"
@@ -170,41 +170,7 @@ func trafficShaperSetupPeerTaskManagerComponents(ctrl *gomock.Controller, opt tr
 	sched := schedulerclientmocks.NewMockClient(ctrl)
 	sched.EXPECT().RegisterPeerTask(gomock.Any(), gomock.Any()).AnyTimes().DoAndReturn(
 		func(ctx context.Context, ptr *schedulerv1.PeerTaskRequest, opts ...grpc.CallOption) (*schedulerv1.RegisterResult, error) {
-			task := taskMap[ptr.TaskId]
-			switch task.scope {
-			case commonv1.SizeScope_TINY:
-				return &schedulerv1.RegisterResult{
-					TaskId:    task.taskID,
-					SizeScope: commonv1.SizeScope_TINY,
-					DirectPiece: &schedulerv1.RegisterResult_PieceContent{
-						PieceContent: task.content,
-					},
-				}, nil
-			case commonv1.SizeScope_SMALL:
-				return &schedulerv1.RegisterResult{
-					TaskId:    task.taskID,
-					SizeScope: commonv1.SizeScope_SMALL,
-					DirectPiece: &schedulerv1.RegisterResult_SinglePiece{
-						SinglePiece: &schedulerv1.SinglePiece{
-							DstPid:  "fake-pid",
-							DstAddr: "fake-addr",
-							PieceInfo: &commonv1.PieceInfo{
-								PieceNum:    0,
-								RangeStart:  0,
-								RangeSize:   uint32(task.contentLength),
-								PieceMd5:    piecesMap[ptr.TaskId][0],
-								PieceOffset: 0,
-								PieceStyle:  0,
-							},
-						},
-					},
-				}, nil
-			}
-			return &schedulerv1.RegisterResult{
-				TaskId:      task.taskID,
-				SizeScope:   commonv1.SizeScope_NORMAL,
-				DirectPiece: nil,
-			}, nil
+			return nil, errors.New("")
 		})
 	sched.EXPECT().ReportPieceResult(gomock.Any(), gomock.Any()).AnyTimes().DoAndReturn(
 		func(ctx context.Context, ptr *schedulerv1.PeerTaskRequest, opts ...grpc.CallOption) (
@@ -386,75 +352,79 @@ func TestTrafficShaper_TaskSuite(t *testing.T) {
 		t.Run(_tc.name, func(t *testing.T) {
 			assert := testifyassert.New(t)
 			require := testifyrequire.New(t)
-			// dup a new test case with the task type
-			logger.Infof("-------------------- test %s started --------------------", _tc.name)
-			tc := _tc
-			tc.legacyFeature = true
-			func() {
-				tasks := make([]taskOption, 0)
-				ctrl := gomock.NewController(t)
-				defer ctrl.Finish()
-				mockContentLength := len(tc.taskData)
+			for _, trafficShaperType := range []string{"plain", "sampling"} {
+				// dup a new test case with the task type
+				logger.Infof("-------------------- test %s, %s traffic shaper started --------------------", _tc.name, trafficShaperType)
+				tc := _tc
+				tc.legacyFeature = true
+				func() {
+					tasks := make([]taskOption, 0)
+					ctrl := gomock.NewController(t)
+					defer ctrl.Finish()
+					mockContentLength := len(tc.taskData)
 
-				urlMeta := &commonv1.UrlMeta{
-					Tag: "d7y-test",
-				}
-				for i := range tc.tasks {
+					urlMeta := &commonv1.UrlMeta{
+						Tag: "d7y-test",
+					}
+					for i := range tc.tasks {
 
-					if tc.httpRange != nil {
-						urlMeta.Range = strings.TrimLeft(tc.httpRange.String(), "bytes=")
+						if tc.httpRange != nil {
+							urlMeta.Range = strings.TrimLeft(tc.httpRange.String(), "bytes=")
+						}
+
+						if tc.urlGenerator != nil {
+							tc.url = tc.urlGenerator(&tc)
+						}
+						taskID := idgen.TaskID(tc.url+fmt.Sprintf("-%d", i), urlMeta)
+						tasks = append(tasks, taskOption{
+							taskID:        taskID,
+							contentLength: int64(mockContentLength),
+							content:       tc.taskData,
+							scope:         tc.sizeScope,
+						})
 					}
 
-					if tc.urlGenerator != nil {
-						tc.url = tc.urlGenerator(&tc)
+					var (
+						downloader   PieceDownloader
+						sourceClient source.ResourceClient
+					)
+
+					if tc.mockPieceDownloader != nil {
+						downloader = tc.mockPieceDownloader(ctrl, tc.taskData, tc.pieceSize)
 					}
-					taskID := idgen.TaskID(tc.url+fmt.Sprintf("-%d", i), urlMeta)
-					tasks = append(tasks, taskOption{
-						taskID:        taskID,
-						contentLength: int64(mockContentLength),
-						content:       tc.taskData,
-						scope:         tc.sizeScope,
-					})
-				}
 
-				var (
-					downloader   PieceDownloader
-					sourceClient source.ResourceClient
-				)
-
-				if tc.mockPieceDownloader != nil {
-					downloader = tc.mockPieceDownloader(ctrl, tc.taskData, tc.pieceSize)
-				}
-
-				if tc.mockHTTPSourceClient != nil {
-					source.UnRegister("http")
-					defer func() {
-						// reset source client
+					if tc.mockHTTPSourceClient != nil {
 						source.UnRegister("http")
-						require.Nil(source.Register("http", httpprotocol.NewHTTPSourceClient(), httpprotocol.Adapter))
-					}()
-					// replace source client
-					sourceClient = tc.mockHTTPSourceClient(t, ctrl, tc.httpRange, tc.taskData, tc.url)
-					require.Nil(source.Register("http", sourceClient, httpprotocol.Adapter))
-				}
+						defer func() {
+							// reset source client
+							source.UnRegister("http")
+							require.Nil(source.Register("http", httpprotocol.NewHTTPSourceClient(), httpprotocol.Adapter))
+						}()
+						// replace source client
+						sourceClient = tc.mockHTTPSourceClient(t, ctrl, tc.httpRange, tc.taskData, tc.url)
+						require.Nil(source.Register("http", sourceClient, httpprotocol.Adapter))
+					}
 
-				option := trafficShaperComponentsOption{
-					tasks:              tasks,
-					pieceSize:          uint32(tc.pieceSize),
-					pieceParallelCount: tc.pieceParallelCount,
-					pieceDownloader:    downloader,
-					sourceClient:       sourceClient,
-					scope:              tc.sizeScope,
-					peerPacketDelay:    tc.peerPacketDelay,
-					backSource:         tc.backSource,
-					getPieceTasks:      tc.legacyFeature,
-				}
-				mm := trafficShaperSetupMockManager(ctrl, &tc, option)
-				defer mm.CleanUp()
+					option := trafficShaperComponentsOption{
+						tasks:              tasks,
+						pieceSize:          uint32(tc.pieceSize),
+						pieceParallelCount: tc.pieceParallelCount,
+						pieceDownloader:    downloader,
+						totalRateLimit:     rate.Limit(tc.pieceSize) * 4,
+						trafficShaperType:  trafficShaperType,
+						sourceClient:       sourceClient,
+						scope:              tc.sizeScope,
+						peerPacketDelay:    tc.peerPacketDelay,
+						backSource:         tc.backSource,
+						getPieceTasks:      tc.legacyFeature,
+					}
+					mm := trafficShaperSetupMockManager(ctrl, &tc, option)
+					defer mm.CleanUp()
 
-				tc.run(assert, require, mm, urlMeta)
-			}()
-			logger.Infof("-------------------- test %s finished --------------------", _tc.name)
+					tc.run(assert, require, mm, urlMeta)
+				}()
+				logger.Infof("-------------------- test %s, %s traffic shaper finished --------------------", _tc.name, trafficShaperType)
+			}
 		})
 	}
 }
@@ -463,11 +433,7 @@ func (ts *trafficShaperTestSpec) run(assert *testifyassert.Assertions, require *
 	var (
 		ptm       = mm.peerTaskManager
 		pieceSize = ts.pieceSize
-		output    = "../test/testdata/test.output"
 	)
-	defer func() {
-		assert.Nil(os.Remove(output))
-	}()
 
 	var ptcCount = len(ts.tasks)
 	ptcs := make([]*peerTaskConductor, ptcCount)
@@ -482,8 +448,7 @@ func (ts *trafficShaperTestSpec) run(assert *testifyassert.Assertions, require *
 		}
 		logger.Infof("taskID: %s", taskID)
 		ptc, created, err := ptm.getOrCreatePeerTaskConductor(
-			context.Background(), taskID, peerTaskRequest, rate.Limit(pieceSize*4), nil, nil, "", false)
-		ptc.needBackSource = atomic.NewBool(true)
+			context.Background(), taskID, peerTaskRequest, rate.Limit(pieceSize), nil, nil, "", false)
 		assert.Nil(err, "load first peerTaskConductor")
 		assert.True(created, "should create a new peerTaskConductor")
 		ptcs[i] = ptc
@@ -494,19 +459,24 @@ func (ts *trafficShaperTestSpec) run(assert *testifyassert.Assertions, require *
 
 	var result = make([]bool, ptcCount)
 
-	for _, ptc := range ptcs {
-		go func(ptc *peerTaskConductor) {
+	for i, ptc := range ptcs {
+		go func(ptc *peerTaskConductor, i int) {
 			defer wg.Done()
 			select {
 			case <-time.After(5 * time.Minute):
 				ptc.Fail()
 			case <-ptc.successCh:
+				logger.Infof("task %s succeed", ptc.taskID)
+				result[i] = true
 				return
 			case <-ptc.failCh:
 				return
 			}
-		}(ptc)
-		require.Nil(ptc.start(), "peerTaskConductor start should be ok")
+		}(ptc, i)
+		go func(ptc *peerTaskConductor, i int) {
+			time.Sleep(ts.tasks[i].delay)
+			require.Nil(ptc.start(), "peerTaskConductor start should be ok")
+		}(ptc, i)
 		switch ts.sizeScope {
 		case commonv1.SizeScope_TINY:
 			require.NotNil(ptc.tinyData)
