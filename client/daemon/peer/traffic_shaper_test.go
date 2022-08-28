@@ -566,8 +566,8 @@ func TestTrafficShaper_TaskSuite(t *testing.T) {
 		t.Run(_tc.name, func(t *testing.T) {
 			assert := testifyassert.New(t)
 			require := testifyrequire.New(t)
-			for _, trafficShaperType := range []string{"plain", "sampling"} {
-				for _, legacy := range []bool{true, false} {
+			for _, legacy := range []bool{true, false} {
+				for _, trafficShaperType := range []string{"plain", "sampling"} {
 					// dup a new test case with the task type
 					logger.Infof("-------------------- test %s, %s traffic shaper, legacy feature: %v started --------------------",
 						_tc.name, trafficShaperType, legacy)
@@ -636,8 +636,11 @@ func TestTrafficShaper_TaskSuite(t *testing.T) {
 						}
 						mm := trafficShaperSetupMockManager(ctrl, &tc, option)
 						defer mm.CleanUp()
-
+						var start = time.Now()
 						tc.run(assert, require, mm, urlMetas)
+						elapsed := time.Since(start)
+						logger.Infof("test: %s, traffic shaper: %s finished, legacy feature: %v, took %s",
+							_tc.name, trafficShaperType, legacy, elapsed)
 					}()
 					logger.Infof("-------------------- test %s, %s traffic shaper, legacy feature: %v finished --------------------",
 						_tc.name, trafficShaperType, legacy)
