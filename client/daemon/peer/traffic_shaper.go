@@ -17,6 +17,7 @@
 package peer
 
 import (
+	logger "d7y.io/dragonfly/v2/internal/dflog"
 	"sync"
 	"time"
 
@@ -86,6 +87,7 @@ type taskEntry struct {
 }
 
 type samplingTrafficShaper struct {
+	*logger.SugaredLoggerOnWith
 	sync.Mutex
 	totalRateLimit rate.Limit
 	tasks          map[string]*taskEntry
@@ -93,10 +95,12 @@ type samplingTrafficShaper struct {
 }
 
 func NewSamplingTrafficShaper(totalRateLimit rate.Limit) TrafficShaper {
+	log := logger.With("component", "PeerTask")
 	return &samplingTrafficShaper{
-		totalRateLimit: totalRateLimit,
-		tasks:          make(map[string]*taskEntry),
-		stopCh:         make(chan struct{}),
+		SugaredLoggerOnWith: log,
+		totalRateLimit:      totalRateLimit,
+		tasks:               make(map[string]*taskEntry),
+		stopCh:              make(chan struct{}),
 	}
 }
 
@@ -161,6 +165,7 @@ func (ts *samplingTrafficShaper) updateLimit() {
 			limit = 0
 		}
 		te.ptc.limiter.SetLimit(rate.Limit(limit))
+		ts.Infof("task %s rate limit updated to %f", te.ptc.taskID, limit)
 	}
 }
 
@@ -168,7 +173,11 @@ func (ts *samplingTrafficShaper) AddTask(taskID string, ptc *peerTaskConductor) 
 	ts.Lock()
 	defer ts.Unlock()
 	ts.tasks[taskID] = &taskEntry{ptc: ptc, usedBandwidth: atomic.NewInt64(0)}
-	ratio := ts.totalRateLimit / (ts.totalRateLimit + ptc.limiter.Limit())
+	var totalNeedRateLimit rate.Limit
+	for _, te := range ts.tasks {
+		totalNeedRateLimit += te.ptc.limiter.Limit()
+	}
+	ratio := ts.totalRateLimit / totalNeedRateLimit
 	// reduce all running tasks' bandwidth
 	for _, te := range ts.tasks {
 		newLimit := ratio * te.ptc.limiter.Limit()
@@ -179,9 +188,12 @@ func (ts *samplingTrafficShaper) AddTask(taskID string, ptc *peerTaskConductor) 
 func (ts *samplingTrafficShaper) RemoveTask(taskID string) {
 	ts.Lock()
 	defer ts.Unlock()
-	limit := ts.tasks[taskID].ptc.limiter.Limit()
 	delete(ts.tasks, taskID)
-	ratio := ts.totalRateLimit / (ts.totalRateLimit - limit)
+	var totalNeedRateLimit rate.Limit
+	for _, te := range ts.tasks {
+		totalNeedRateLimit += te.ptc.limiter.Limit()
+	}
+	ratio := ts.totalRateLimit / totalNeedRateLimit
 	// increase all running tasks' bandwidth
 	for _, te := range ts.tasks {
 		newLimit := ratio * te.ptc.limiter.Limit()
