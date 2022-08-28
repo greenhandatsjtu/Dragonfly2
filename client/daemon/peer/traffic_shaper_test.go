@@ -326,6 +326,7 @@ func trafficShaperSetupMockManager(ctrl *gomock.Controller, ts *trafficShaperTes
 			ScheduleTimeout: scheduleTimeout,
 		},
 	}
+	ptm.trafficShaper.Start()
 	return &trafficShaperMockManager{
 		testSpec:        ts,
 		peerTaskManager: ptm,

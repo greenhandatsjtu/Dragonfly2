@@ -154,7 +154,12 @@ func (ts *samplingTrafficShaper) updateLimit() {
 
 	// allocate bandwidth for tasks based on their remaining length
 	for _, te := range ts.tasks {
-		limit := float64(ts.totalRateLimit) * (float64(te.needBandwidth) / float64(totalNeedBandwidth))
+		var limit float64
+		if totalNeedBandwidth > 0 {
+			limit = float64(ts.totalRateLimit) * (float64(te.needBandwidth) / float64(totalNeedBandwidth))
+		} else {
+			limit = 0
+		}
 		te.ptc.limiter.SetLimit(rate.Limit(limit))
 	}
 }
