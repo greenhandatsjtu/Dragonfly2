@@ -578,12 +578,12 @@ func TestTrafficShaper_TaskSuite(t *testing.T) {
 						ctrl := gomock.NewController(t)
 						defer ctrl.Finish()
 						mockContentLength := len(tc.taskData)
-
-						urlMeta := &commonv1.UrlMeta{
-							Tag: "d7y-test",
-						}
+						urlMetas := make([]*commonv1.UrlMeta, len(tc.tasks))
 						for i := range tc.tasks {
-
+							urlMeta := &commonv1.UrlMeta{
+								Tag: "d7y-test",
+							}
+							urlMetas[i] = urlMeta
 							if tc.httpRange != nil {
 								urlMeta.Range = strings.TrimLeft(tc.httpRange.String(), "bytes=")
 							}
@@ -637,7 +637,7 @@ func TestTrafficShaper_TaskSuite(t *testing.T) {
 						mm := trafficShaperSetupMockManager(ctrl, &tc, option)
 						defer mm.CleanUp()
 
-						tc.run(assert, require, mm, urlMeta)
+						tc.run(assert, require, mm, urlMetas)
 					}()
 					logger.Infof("-------------------- test %s, %s traffic shaper, legacy feature: %v finished --------------------",
 						_tc.name, trafficShaperType, legacy)
@@ -647,7 +647,7 @@ func TestTrafficShaper_TaskSuite(t *testing.T) {
 	}
 }
 
-func (ts *trafficShaperTestSpec) run(assert *testifyassert.Assertions, require *testifyrequire.Assertions, mm *trafficShaperMockManager, urlMeta *commonv1.UrlMeta) {
+func (ts *trafficShaperTestSpec) run(assert *testifyassert.Assertions, require *testifyrequire.Assertions, mm *trafficShaperMockManager, urlMetas []*commonv1.UrlMeta) {
 	var (
 		ptm      = mm.peerTaskManager
 		ptcCount = len(ts.tasks)
@@ -656,10 +656,10 @@ func (ts *trafficShaperTestSpec) run(assert *testifyassert.Assertions, require *
 	ptcs := make([]*peerTaskConductor, ptcCount)
 
 	for i := range ts.tasks {
-		taskID := idgen.TaskID(ts.url+fmt.Sprintf("-%d", i), urlMeta)
+		taskID := idgen.TaskID(ts.url+fmt.Sprintf("-%d", i), urlMetas[i])
 		peerTaskRequest := &schedulerv1.PeerTaskRequest{
 			Url:      ts.url + fmt.Sprintf("-%d", i),
-			UrlMeta:  urlMeta,
+			UrlMeta:  urlMetas[i],
 			PeerId:   ts.peerID,
 			PeerHost: &schedulerv1.PeerHost{},
 		}
