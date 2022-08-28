@@ -353,6 +353,9 @@ type trafficShaperTestSpec struct {
 	// it's useful for httptest server
 	urlGenerator func(ts *trafficShaperTestSpec) string
 
+	perPeerRateLimit rate.Limit
+	totalRateLimit   rate.Limit
+
 	// mock schedule timeout
 	peerPacketDelay []time.Duration
 	scheduleTimeout time.Duration
@@ -396,6 +399,8 @@ func TestTrafficShaper_TaskSuite(t *testing.T) {
 			peerID:               "normal-size-peer-p2p-single-task",
 			url:                  "http://localhost/test/data",
 			sizeScope:            commonv1.SizeScope_NORMAL,
+			perPeerRateLimit:     rate.Limit(1024 * 4),
+			totalRateLimit:       rate.Limit(1024 * 10),
 			mockPieceDownloader:  commonPieceDownloader,
 			mockHTTPSourceClient: nil,
 		},
@@ -418,6 +423,8 @@ func TestTrafficShaper_TaskSuite(t *testing.T) {
 			peerID:               "normal-size-peer-p2p-multiple-tasks",
 			url:                  "http://localhost/test/data",
 			sizeScope:            commonv1.SizeScope_NORMAL,
+			perPeerRateLimit:     rate.Limit(1024 * 4),
+			totalRateLimit:       rate.Limit(1024 * 10),
 			mockPieceDownloader:  commonPieceDownloader,
 			mockHTTPSourceClient: nil,
 		},
@@ -435,6 +442,8 @@ func TestTrafficShaper_TaskSuite(t *testing.T) {
 			backSource:          true,
 			url:                 "http://localhost/test/data",
 			sizeScope:           commonv1.SizeScope_NORMAL,
+			perPeerRateLimit:    rate.Limit(1024 * 4),
+			totalRateLimit:      rate.Limit(1024 * 10),
 			mockPieceDownloader: nil,
 			mockHTTPSourceClient: func(t *testing.T, ctrl *gomock.Controller, rg *util.Range, taskData []byte, url string) source.ResourceClient {
 				sourceClient := sourcemocks.NewMockResourceClient(ctrl)
@@ -463,6 +472,8 @@ func TestTrafficShaper_TaskSuite(t *testing.T) {
 			backSource:          true,
 			url:                 "http://localhost/test/data",
 			sizeScope:           commonv1.SizeScope_NORMAL,
+			perPeerRateLimit:    rate.Limit(1024 * 4),
+			totalRateLimit:      rate.Limit(1024 * 10),
 			mockPieceDownloader: nil,
 			mockHTTPSourceClient: func(t *testing.T, ctrl *gomock.Controller, rg *util.Range, taskData []byte, url string) source.ResourceClient {
 				sourceClient := sourcemocks.NewMockResourceClient(ctrl)
@@ -497,6 +508,8 @@ func TestTrafficShaper_TaskSuite(t *testing.T) {
 			backSource:          true,
 			url:                 "http://localhost/test/data",
 			sizeScope:           commonv1.SizeScope_NORMAL,
+			perPeerRateLimit:    rate.Limit(1024 * 4),
+			totalRateLimit:      rate.Limit(1024 * 10),
 			mockPieceDownloader: nil,
 			mockHTTPSourceClient: func(t *testing.T, ctrl *gomock.Controller, rg *util.Range, taskData []byte, url string) source.ResourceClient {
 				sourceClient := sourcemocks.NewMockResourceClient(ctrl)
@@ -531,6 +544,8 @@ func TestTrafficShaper_TaskSuite(t *testing.T) {
 			backSource:          true,
 			url:                 "http://localhost/test/data",
 			sizeScope:           commonv1.SizeScope_NORMAL,
+			perPeerRateLimit:    rate.Limit(1024 * 4),
+			totalRateLimit:      rate.Limit(1024 * 10),
 			mockPieceDownloader: nil,
 			mockHTTPSourceClient: func(t *testing.T, ctrl *gomock.Controller, rg *util.Range, taskData []byte, url string) source.ResourceClient {
 				sourceClient := sourcemocks.NewMockResourceClient(ctrl)
@@ -552,77 +567,81 @@ func TestTrafficShaper_TaskSuite(t *testing.T) {
 			assert := testifyassert.New(t)
 			require := testifyrequire.New(t)
 			for _, trafficShaperType := range []string{"plain", "sampling"} {
-				// dup a new test case with the task type
-				logger.Infof("-------------------- test %s, %s traffic shaper started --------------------", _tc.name, trafficShaperType)
-				tc := _tc
-				tc.legacyFeature = false
-				func() {
-					tasks := make([]taskOption, 0)
-					ctrl := gomock.NewController(t)
-					defer ctrl.Finish()
-					mockContentLength := len(tc.taskData)
+				for _, legacy := range []bool{true, false} {
+					// dup a new test case with the task type
+					logger.Infof("-------------------- test %s, %s traffic shaper, legacy feature: %v started --------------------",
+						_tc.name, trafficShaperType, legacy)
+					tc := _tc
+					tc.legacyFeature = legacy
+					func() {
+						tasks := make([]taskOption, 0)
+						ctrl := gomock.NewController(t)
+						defer ctrl.Finish()
+						mockContentLength := len(tc.taskData)
 
-					urlMeta := &commonv1.UrlMeta{
-						Tag: "d7y-test",
-					}
-					for i := range tc.tasks {
+						urlMeta := &commonv1.UrlMeta{
+							Tag: "d7y-test",
+						}
+						for i := range tc.tasks {
 
-						if tc.httpRange != nil {
-							urlMeta.Range = strings.TrimLeft(tc.httpRange.String(), "bytes=")
+							if tc.httpRange != nil {
+								urlMeta.Range = strings.TrimLeft(tc.httpRange.String(), "bytes=")
+							}
+
+							if tc.urlGenerator != nil {
+								tc.url = tc.urlGenerator(&tc)
+							}
+							taskID := idgen.TaskID(tc.url+fmt.Sprintf("-%d", i), urlMeta)
+							tasks = append(tasks, taskOption{
+								taskID:        taskID,
+								contentLength: int64(mockContentLength),
+								content:       tc.taskData,
+								scope:         tc.sizeScope,
+							})
 						}
 
-						if tc.urlGenerator != nil {
-							tc.url = tc.urlGenerator(&tc)
+						var (
+							downloader   PieceDownloader
+							sourceClient source.ResourceClient
+						)
+
+						if tc.mockPieceDownloader != nil {
+							downloader = tc.mockPieceDownloader(ctrl, tc.taskData, tc.pieceSize)
 						}
-						taskID := idgen.TaskID(tc.url+fmt.Sprintf("-%d", i), urlMeta)
-						tasks = append(tasks, taskOption{
-							taskID:        taskID,
-							contentLength: int64(mockContentLength),
-							content:       tc.taskData,
-							scope:         tc.sizeScope,
-						})
-					}
 
-					var (
-						downloader   PieceDownloader
-						sourceClient source.ResourceClient
-					)
-
-					if tc.mockPieceDownloader != nil {
-						downloader = tc.mockPieceDownloader(ctrl, tc.taskData, tc.pieceSize)
-					}
-
-					if tc.mockHTTPSourceClient != nil {
-						source.UnRegister("http")
-						defer func() {
-							// reset source client
+						if tc.mockHTTPSourceClient != nil {
 							source.UnRegister("http")
-							require.Nil(source.Register("http", httpprotocol.NewHTTPSourceClient(), httpprotocol.Adapter))
-						}()
-						// replace source client
-						sourceClient = tc.mockHTTPSourceClient(t, ctrl, tc.httpRange, tc.taskData, tc.url)
-						require.Nil(source.Register("http", sourceClient, httpprotocol.Adapter))
-					}
+							defer func() {
+								// reset source client
+								source.UnRegister("http")
+								require.Nil(source.Register("http", httpprotocol.NewHTTPSourceClient(), httpprotocol.Adapter))
+							}()
+							// replace source client
+							sourceClient = tc.mockHTTPSourceClient(t, ctrl, tc.httpRange, tc.taskData, tc.url)
+							require.Nil(source.Register("http", sourceClient, httpprotocol.Adapter))
+						}
 
-					option := trafficShaperComponentsOption{
-						tasks:              tasks,
-						pieceSize:          uint32(tc.pieceSize),
-						pieceParallelCount: tc.pieceParallelCount,
-						pieceDownloader:    downloader,
-						totalRateLimit:     rate.Limit(tc.pieceSize) * 10,
-						trafficShaperType:  trafficShaperType,
-						sourceClient:       sourceClient,
-						scope:              tc.sizeScope,
-						peerPacketDelay:    tc.peerPacketDelay,
-						backSource:         tc.backSource,
-						getPieceTasks:      tc.legacyFeature,
-					}
-					mm := trafficShaperSetupMockManager(ctrl, &tc, option)
-					defer mm.CleanUp()
+						option := trafficShaperComponentsOption{
+							tasks:              tasks,
+							pieceSize:          uint32(tc.pieceSize),
+							pieceParallelCount: tc.pieceParallelCount,
+							pieceDownloader:    downloader,
+							totalRateLimit:     tc.totalRateLimit,
+							trafficShaperType:  trafficShaperType,
+							sourceClient:       sourceClient,
+							scope:              tc.sizeScope,
+							peerPacketDelay:    tc.peerPacketDelay,
+							backSource:         tc.backSource,
+							getPieceTasks:      tc.legacyFeature,
+						}
+						mm := trafficShaperSetupMockManager(ctrl, &tc, option)
+						defer mm.CleanUp()
 
-					tc.run(assert, require, mm, urlMeta)
-				}()
-				logger.Infof("-------------------- test %s, %s traffic shaper finished --------------------", _tc.name, trafficShaperType)
+						tc.run(assert, require, mm, urlMeta)
+					}()
+					logger.Infof("-------------------- test %s, %s traffic shaper, legacy feature: %v finished --------------------",
+						_tc.name, trafficShaperType, legacy)
+				}
 			}
 		})
 	}
@@ -630,11 +649,10 @@ func TestTrafficShaper_TaskSuite(t *testing.T) {
 
 func (ts *trafficShaperTestSpec) run(assert *testifyassert.Assertions, require *testifyrequire.Assertions, mm *trafficShaperMockManager, urlMeta *commonv1.UrlMeta) {
 	var (
-		ptm       = mm.peerTaskManager
-		pieceSize = ts.pieceSize
+		ptm      = mm.peerTaskManager
+		ptcCount = len(ts.tasks)
 	)
 
-	var ptcCount = len(ts.tasks)
 	ptcs := make([]*peerTaskConductor, ptcCount)
 
 	for i := range ts.tasks {
@@ -647,7 +665,7 @@ func (ts *trafficShaperTestSpec) run(assert *testifyassert.Assertions, require *
 		}
 		logger.Infof("taskID: %s", taskID)
 		ptc, created, err := ptm.getOrCreatePeerTaskConductor(
-			context.Background(), taskID, peerTaskRequest, rate.Limit(pieceSize)*4, nil, nil, "", false)
+			context.Background(), taskID, peerTaskRequest, ts.perPeerRateLimit, nil, nil, "", false)
 		assert.Nil(err, "load first peerTaskConductor")
 		assert.True(created, "should create a new peerTaskConductor")
 		ptcs[i] = ptc
