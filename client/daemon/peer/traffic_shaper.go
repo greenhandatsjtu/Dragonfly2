@@ -132,23 +132,25 @@ func (ts *samplingTrafficShaper) updateLimit() {
 	// compute overall remaining length of all tasks
 	for _, te := range ts.tasks {
 		var needBandwidth int64
-		if !te.needUpdate {
-			// if this task is added within 1 second, don't update its limit this time
-			te.needUpdate = true
+		if !te.ptc.limiter.Allow() {
+			// case 1: bandwidth is fully used
 			needBandwidth = int64(te.ptc.limiter.Limit())
+
 		} else {
-			if !te.ptc.limiter.Allow() {
-				// case 1: bandwidth is fully used
+			// case 2: bandwidth is not fully used
+			needBandwidth = te.usedBandwidth.Load()
+		}
+		if !te.needUpdate {
+			// if this task is added within 1 second, don't reduce its limit this time
+			te.needUpdate = true
+			if int64(te.ptc.limiter.Limit()) > needBandwidth {
 				needBandwidth = int64(te.ptc.limiter.Limit())
-			} else {
-				// case 2: bandwidth is not fully used
-				needBandwidth = te.usedBandwidth.Load()
 			}
-			if contentLength := te.ptc.contentLength.Load(); contentLength > 0 {
-				remainingLength := contentLength - te.ptc.completedLength.Load()
-				if remainingLength < needBandwidth {
-					needBandwidth = remainingLength
-				}
+		}
+		if contentLength := te.ptc.contentLength.Load(); contentLength > 0 {
+			remainingLength := contentLength - te.ptc.completedLength.Load()
+			if remainingLength < needBandwidth {
+				needBandwidth = remainingLength
 			}
 		}
 		te.needBandwidth = needBandwidth
