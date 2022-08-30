@@ -17,10 +17,10 @@
 package peer
 
 import (
-	logger "d7y.io/dragonfly/v2/internal/dflog"
 	"sync"
 	"time"
 
+	logger "d7y.io/dragonfly/v2/internal/dflog"
 	"go.uber.org/atomic"
 	"golang.org/x/time/rate"
 )
