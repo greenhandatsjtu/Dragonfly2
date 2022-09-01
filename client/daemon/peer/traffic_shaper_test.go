@@ -235,7 +235,9 @@ func trafficShaperSetupMockManager(ctrl *gomock.Controller, ts *trafficShaperTes
 		},
 		conductorLock:    &sync.Mutex{},
 		runningPeerTasks: sync.Map{},
-		trafficShaper:    NewTrafficShaper(opt.totalRateLimit, opt.trafficShaperType),
+		trafficShaper: NewTrafficShaper(opt.totalRateLimit, opt.trafficShaperType, func(contentLength int64) uint32 {
+			return opt.pieceSize
+		}),
 		pieceManager: &pieceManager{
 			Limiter:         rate.NewLimiter(opt.totalRateLimit, int(opt.totalRateLimit)),
 			calculateDigest: true,
@@ -326,11 +328,43 @@ func TestTrafficShaper_TaskSuite(t *testing.T) {
 			mockHTTPSourceClient: nil,
 		},
 		{
-			name: "normal size scope - p2p - multiple tasks",
+			name: "normal size scope - p2p - multiple tasks - concurrency",
+			taskDelays: []time.Duration{
+				0,
+				0,
+				0,
+			},
+			taskData:             testBytes,
+			pieceSize:            1024,
+			peerID:               "normal-size-peer-p2p-multiple-tasks",
+			url:                  "http://localhost/test/data",
+			perPeerRateLimit:     rate.Limit(1024 * 4),
+			totalRateLimit:       rate.Limit(1024 * 10),
+			mockPieceDownloader:  commonPieceDownloader,
+			mockHTTPSourceClient: nil,
+		},
+		{
+			name: "normal size scope - p2p - multiple tasks - overlapped",
 			taskDelays: []time.Duration{
 				0,
 				100 * time.Millisecond,
 				500 * time.Millisecond,
+			},
+			taskData:             testBytes,
+			pieceSize:            1024,
+			peerID:               "normal-size-peer-p2p-multiple-tasks",
+			url:                  "http://localhost/test/data",
+			perPeerRateLimit:     rate.Limit(1024 * 4),
+			totalRateLimit:       rate.Limit(1024 * 10),
+			mockPieceDownloader:  commonPieceDownloader,
+			mockHTTPSourceClient: nil,
+		},
+		{
+			name: "normal size scope - p2p - multiple tasks - non-overlapped",
+			taskDelays: []time.Duration{
+				0,
+				600 * time.Millisecond,
+				1100 * time.Millisecond,
 			},
 			taskData:             testBytes,
 			pieceSize:            1024,
@@ -514,12 +548,14 @@ func (ts *trafficShaperTestSpec) run(assert *testifyassert.Assertions, require *
 		go func(ptc *peerTaskConductor, i int) {
 			time.Sleep(ts.taskDelays[i])
 			require.Nil(ptc.start(), "peerTaskConductor start should be ok")
+			start := time.Now()
 			defer wg.Done()
 			select {
 			case <-time.After(5 * time.Minute):
 				ptc.Fail()
 			case <-ptc.successCh:
-				logger.Infof("task %s succeed", ptc.taskID)
+				elapsed := time.Since(start)
+				logger.Infof("%dth task %s succeed, took %s", i, ptc.taskID, elapsed)
 				result[i] = true
 				return
 			case <-ptc.failCh:

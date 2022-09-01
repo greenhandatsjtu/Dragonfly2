@@ -376,7 +376,9 @@ func (pt *peerTaskConductor) start() error {
 			return err
 		}
 	}
-
+	if pt.trafficShaper != nil {
+		pt.trafficShaper.AddTask(pt.taskID, pt)
+	}
 	go pt.broker.Start()
 	go pt.pullPieces()
 	return nil

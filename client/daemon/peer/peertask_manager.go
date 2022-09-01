@@ -20,6 +20,7 @@ package peer
 
 import (
 	"context"
+	"d7y.io/dragonfly/v2/internal/util"
 	"errors"
 	"fmt"
 	"io"
@@ -38,7 +39,7 @@ import (
 	"d7y.io/dragonfly/v2/client/config"
 	"d7y.io/dragonfly/v2/client/daemon/metrics"
 	"d7y.io/dragonfly/v2/client/daemon/storage"
-	"d7y.io/dragonfly/v2/client/util"
+	clientutl "d7y.io/dragonfly/v2/client/util"
 	logger "d7y.io/dragonfly/v2/internal/dflog"
 	"d7y.io/dragonfly/v2/pkg/idgen"
 	schedulerclient "d7y.io/dragonfly/v2/pkg/rpc/scheduler/client"
@@ -167,7 +168,7 @@ func NewPeerTaskManager(
 		storageManager:    storageManager,
 		schedulerClient:   schedulerClient,
 		schedulerOption:   schedulerOption,
-		trafficShaper:     NewTrafficShaper(totalRateLimit, trafficShaperType),
+		trafficShaper:     NewTrafficShaper(totalRateLimit, trafficShaperType, util.ComputePieceSize),
 		perPeerRateLimit:  perPeerRateLimit,
 		enableMultiplex:   multiplex,
 		enablePrefetch:    prefetch,
@@ -192,7 +193,7 @@ func (ptm *peerTaskManager) getPeerTaskConductor(ctx context.Context,
 	request *schedulerv1.PeerTaskRequest,
 	limit rate.Limit,
 	parent *peerTaskConductor,
-	rg *util.Range,
+	rg *clientutl.Range,
 	desiredLocation string,
 	seed bool) (*peerTaskConductor, error) {
 	ptc, created, err := ptm.getOrCreatePeerTaskConductor(ctx, taskID, request, limit, parent, rg, desiredLocation, seed)
@@ -215,7 +216,7 @@ func (ptm *peerTaskManager) getOrCreatePeerTaskConductor(
 	request *schedulerv1.PeerTaskRequest,
 	limit rate.Limit,
 	parent *peerTaskConductor,
-	rg *util.Range,
+	rg *clientutl.Range,
 	desiredLocation string,
 	seed bool) (*peerTaskConductor, bool, error) {
 	if ptc, ok := ptm.findPeerTaskConductor(taskID); ok {
@@ -238,9 +239,6 @@ func (ptm *peerTaskManager) getOrCreatePeerTaskConductor(
 	}
 	ptm.runningPeerTasks.Store(taskID, ptc)
 	ptm.conductorLock.Unlock()
-	if ptm.trafficShaper != nil {
-		ptm.trafficShaper.AddTask(taskID, ptc)
-	}
 	metrics.PeerTaskCount.Add(1)
 	logger.Debugf("peer task created: %s/%s", ptc.taskID, ptc.peerID)
 
@@ -253,7 +251,7 @@ func (ptm *peerTaskManager) getOrCreatePeerTaskConductor(
 	return ptc, true, nil
 }
 
-func (ptm *peerTaskManager) enabledPrefetch(rg *util.Range) bool {
+func (ptm *peerTaskManager) enabledPrefetch(rg *clientutl.Range) bool {
 	return ptm.enablePrefetch && rg != nil
 }
 

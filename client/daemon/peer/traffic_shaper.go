@@ -44,15 +44,15 @@ type TrafficShaper interface {
 	Record(taskID string, n int)
 }
 
-func NewTrafficShaper(totalRateLimit rate.Limit, trafficShaperType string) TrafficShaper {
+func NewTrafficShaper(totalRateLimit rate.Limit, trafficShaperType string, computePieceSize func(int64) uint32) TrafficShaper {
 	var ts TrafficShaper
 	switch trafficShaperType {
 	case TypeSamplingTrafficShaper:
-		ts = NewSamplingTrafficShaper(totalRateLimit)
+		ts = NewSamplingTrafficShaper(totalRateLimit, computePieceSize)
 	case TypePlainTrafficShaper:
-		ts = NewPlainTrafficShaper(totalRateLimit)
+		ts = NewPlainTrafficShaper()
 	default:
-		ts = NewPlainTrafficShaper(totalRateLimit)
+		ts = NewPlainTrafficShaper()
 	}
 	return ts
 }
@@ -60,7 +60,7 @@ func NewTrafficShaper(totalRateLimit rate.Limit, trafficShaperType string) Traff
 type plainTrafficShaper struct {
 }
 
-func NewPlainTrafficShaper(_ rate.Limit) TrafficShaper {
+func NewPlainTrafficShaper() TrafficShaper {
 	return &plainTrafficShaper{}
 }
 
@@ -81,6 +81,7 @@ func (ts *plainTrafficShaper) Record(_ string, _ int) {
 
 type taskEntry struct {
 	ptc           *peerTaskConductor
+	pieceSize     uint32
 	usedBandwidth *atomic.Int64
 	needBandwidth int64
 	needUpdate    bool
@@ -89,15 +90,17 @@ type taskEntry struct {
 type samplingTrafficShaper struct {
 	*logger.SugaredLoggerOnWith
 	sync.Mutex
-	totalRateLimit rate.Limit
-	tasks          map[string]*taskEntry
-	stopCh         chan struct{}
+	computePieceSize func(int64) uint32
+	totalRateLimit   rate.Limit
+	tasks            map[string]*taskEntry
+	stopCh           chan struct{}
 }
 
-func NewSamplingTrafficShaper(totalRateLimit rate.Limit) TrafficShaper {
-	log := logger.With("component", "PeerTask")
+func NewSamplingTrafficShaper(totalRateLimit rate.Limit, computePieceSize func(int64) uint32) TrafficShaper {
+	log := logger.With("component", "TrafficShaper")
 	return &samplingTrafficShaper{
 		SugaredLoggerOnWith: log,
+		computePieceSize:    computePieceSize,
 		totalRateLimit:      totalRateLimit,
 		tasks:               make(map[string]*taskEntry),
 		stopCh:              make(chan struct{}),
@@ -127,24 +130,19 @@ func (ts *samplingTrafficShaper) Stop() {
 // updateLimit updates every task's limit every second
 func (ts *samplingTrafficShaper) updateLimit() {
 	var totalNeedBandwidth int64
+	var totalLeastBandwidth int64
 	ts.Lock()
 	defer ts.Unlock()
 	// compute overall remaining length of all tasks
 	for _, te := range ts.tasks {
 		var needBandwidth int64
-		if !te.ptc.limiter.Allow() {
-			// case 1: bandwidth is fully used
-			needBandwidth = int64(te.ptc.limiter.Limit())
-
-		} else {
-			// case 2: bandwidth is not fully used
-			needBandwidth = te.usedBandwidth.Load()
-		}
+		oldLimit := int64(te.ptc.limiter.Limit())
+		needBandwidth = te.usedBandwidth.Load()
 		if !te.needUpdate {
 			// if this task is added within 1 second, don't reduce its limit this time
 			te.needUpdate = true
-			if int64(te.ptc.limiter.Limit()) > needBandwidth {
-				needBandwidth = int64(te.ptc.limiter.Limit())
+			if oldLimit > needBandwidth {
+				needBandwidth = oldLimit
 			}
 		}
 		if contentLength := te.ptc.contentLength.Load(); contentLength > 0 {
@@ -153,28 +151,41 @@ func (ts *samplingTrafficShaper) updateLimit() {
 				needBandwidth = remainingLength
 			}
 		}
+		// delta bandwidth
+		needBandwidth -= int64(te.pieceSize)
+		if needBandwidth < 0 {
+			needBandwidth = 0
+		}
 		te.needBandwidth = needBandwidth
 		totalNeedBandwidth += needBandwidth
+		totalLeastBandwidth += int64(te.pieceSize)
 		te.usedBandwidth.Store(0)
 	}
 
-	// allocate bandwidth for tasks based on their remaining length
+	// allocate delta bandwidth for tasks
 	for _, te := range ts.tasks {
-		var limit float64
-		if totalNeedBandwidth > 0 {
-			limit = float64(ts.totalRateLimit) * (float64(te.needBandwidth) / float64(totalNeedBandwidth))
-		} else {
-			limit = 0
+		var deltaLimit float64
+		deltaLimit = (float64(ts.totalRateLimit) - float64(totalLeastBandwidth)) * (float64(te.needBandwidth) / float64(totalNeedBandwidth))
+		// make sure new limit is not smaller than pieceSize
+		if deltaLimit < 0 {
+			deltaLimit = 0
 		}
-		te.ptc.limiter.SetLimit(rate.Limit(limit))
-		ts.Infof("task %s rate limit updated to %f", te.ptc.taskID, limit)
+		te.ptc.limiter.SetLimit(rate.Limit(deltaLimit + float64(te.pieceSize)))
+		ts.Debugf("period update limit, task %s, need bandwidth %d, delta rate limit %f", te.ptc.taskID, te.needBandwidth, deltaLimit)
 	}
 }
 
 func (ts *samplingTrafficShaper) AddTask(taskID string, ptc *peerTaskConductor) {
 	ts.Lock()
 	defer ts.Unlock()
-	ts.tasks[taskID] = &taskEntry{ptc: ptc, usedBandwidth: atomic.NewInt64(0)}
+	nTasks := len(ts.tasks)
+	if nTasks == 0 {
+		nTasks++
+	}
+	limit := rate.Limit(float64(ts.totalRateLimit) / float64(nTasks))
+	ptc.limiter.SetLimit(limit)
+	pieceSize := ts.computePieceSize(ptc.contentLength.Load())
+	ts.tasks[taskID] = &taskEntry{ptc: ptc, usedBandwidth: atomic.NewInt64(0), pieceSize: pieceSize}
 	var totalNeedRateLimit rate.Limit
 	for _, te := range ts.tasks {
 		totalNeedRateLimit += te.ptc.limiter.Limit()
@@ -183,23 +194,26 @@ func (ts *samplingTrafficShaper) AddTask(taskID string, ptc *peerTaskConductor) 
 	// reduce all running tasks' bandwidth
 	for _, te := range ts.tasks {
 		newLimit := ratio * te.ptc.limiter.Limit()
+		// make sure bandwidth is not smaller than pieceSize
+		if float64(newLimit) < float64(te.pieceSize) {
+			newLimit = rate.Limit(te.pieceSize)
+		}
 		te.ptc.limiter.SetLimit(newLimit)
+		ts.Debugf("a task added, task %s rate limit updated to %f", te.ptc.taskID, newLimit)
 	}
 }
 
 func (ts *samplingTrafficShaper) RemoveTask(taskID string) {
 	ts.Lock()
 	defer ts.Unlock()
+	limit := ts.tasks[taskID].ptc.limiter.Limit()
 	delete(ts.tasks, taskID)
-	var totalNeedRateLimit rate.Limit
-	for _, te := range ts.tasks {
-		totalNeedRateLimit += te.ptc.limiter.Limit()
-	}
-	ratio := ts.totalRateLimit / totalNeedRateLimit
+	ratio := ts.totalRateLimit / (ts.totalRateLimit - limit)
 	// increase all running tasks' bandwidth
 	for _, te := range ts.tasks {
 		newLimit := ratio * te.ptc.limiter.Limit()
 		te.ptc.limiter.SetLimit(newLimit)
+		ts.Debugf("a task removed, task %s rate limit updated to %f", te.ptc.taskID, newLimit)
 	}
 }
 
