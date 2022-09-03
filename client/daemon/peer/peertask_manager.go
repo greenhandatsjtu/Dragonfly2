@@ -20,7 +20,6 @@ package peer
 
 import (
 	"context"
-	"d7y.io/dragonfly/v2/internal/util"
 	"errors"
 	"fmt"
 	"io"
@@ -41,6 +40,7 @@ import (
 	"d7y.io/dragonfly/v2/client/daemon/storage"
 	clientutl "d7y.io/dragonfly/v2/client/util"
 	logger "d7y.io/dragonfly/v2/internal/dflog"
+	"d7y.io/dragonfly/v2/internal/util"
 	"d7y.io/dragonfly/v2/pkg/idgen"
 	schedulerclient "d7y.io/dragonfly/v2/pkg/rpc/scheduler/client"
 )

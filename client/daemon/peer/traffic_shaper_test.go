@@ -300,9 +300,8 @@ func TestTrafficShaper_TaskSuite(t *testing.T) {
 				func(request *source.Request) (int64, error) {
 					if hasLength {
 						return int64(len(taskData)), nil
-					} else {
-						return -1, nil
 					}
+					return -1, nil
 				})
 			sourceClient.EXPECT().Download(gomock.Any()).AnyTimes().DoAndReturn(
 				func(request *source.Request) (*source.Response, error) {
@@ -355,6 +354,22 @@ func TestTrafficShaper_TaskSuite(t *testing.T) {
 			peerID:               "normal-size-peer-p2p-multiple-tasks",
 			url:                  "http://localhost/test/data",
 			perPeerRateLimit:     rate.Limit(1024 * 4),
+			totalRateLimit:       rate.Limit(1024 * 10),
+			mockPieceDownloader:  commonPieceDownloader,
+			mockHTTPSourceClient: nil,
+		},
+		{
+			name: "normal size scope - p2p - multiple tasks - overlapped - low bandwidth",
+			taskDelays: []time.Duration{
+				0,
+				100 * time.Millisecond,
+				500 * time.Millisecond,
+			},
+			taskData:             testBytes,
+			pieceSize:            1024,
+			peerID:               "normal-size-peer-p2p-multiple-tasks",
+			url:                  "http://localhost/test/data",
+			perPeerRateLimit:     rate.Limit(1024 * 2),
 			totalRateLimit:       rate.Limit(1024 * 10),
 			mockPieceDownloader:  commonPieceDownloader,
 			mockHTTPSourceClient: nil,

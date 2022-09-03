@@ -20,9 +20,10 @@ import (
 	"sync"
 	"time"
 
-	logger "d7y.io/dragonfly/v2/internal/dflog"
 	"go.uber.org/atomic"
 	"golang.org/x/time/rate"
+
+	logger "d7y.io/dragonfly/v2/internal/dflog"
 )
 
 const (
